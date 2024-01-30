@@ -1,0 +1,80 @@
+# Importations supplémentaires nécessaires
+import psycopg2
+import warnings
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+
+warnings.filterwarnings('ignore')
+
+app = Flask(__name__)
+CORS(app, origins="http://localhost:4200", supports_credentials=True)
+
+# Se connecter à la base de données PostgreSQL
+connection = psycopg2.connect(
+    user='postgres',
+    password='',
+    host='localhost',
+    port='5432',
+    database='Pfe'
+)
+
+@app.route('/content_recommendations', methods=['GET'])
+def get_content_recommendations():
+    try:
+        # 1. Extraction des articles commandés par l'utilisateur
+        user_id = int(request.args.get('user_id'))
+        num_of_products = int(request.args.get('num_of_products', 5))
+
+        query_commands = f"""
+            SELECT lc.iduser, lc.idarticle, a.rating
+            FROM lignecommandeclient lc
+            JOIN article a ON lc.idarticle = a.id
+            WHERE lc.iduser = {user_id}
+        """
+
+        df_user_commands = pd.read_sql_query(query_commands, connection)
+
+        # 2. Requête pour obtenir toutes les informations sur les articles
+        query_all_articles = """
+            SELECT id, designation, rating FROM article
+        """
+
+        df_articles = pd.read_sql_query(query_all_articles, connection)
+
+        # 3. Caractéristiques des articles
+        article_features = df_articles['designation'].fillna('')
+
+        # 4. Construction d'un vecteur de caractéristiques pour chaque article
+        tfidf_vectorizer = TfidfVectorizer()
+        tfidf_matrix = tfidf_vectorizer.fit_transform(article_features)
+
+        # 5. Calcul de la similarité
+        cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+
+        # 6. Recommandation d'articles similaires aux articles commandés par l'utilisateur
+        user_article_ids = df_user_commands['idarticle'].unique().tolist()
+
+        recommended_articles = []
+
+        for article_id in user_article_ids:
+            article_index = df_articles[df_articles['id'] == article_id].index[0]
+            similar_articles = list(enumerate(cosine_sim[article_index]))
+            similar_articles = sorted(similar_articles, key=lambda x: x[1], reverse=True)[1:]
+
+            for i in range(len(similar_articles)):
+                similar_article_id = df_articles.iloc[similar_articles[i][0]]['id']
+                if similar_article_id not in user_article_ids and similar_article_id not in recommended_articles:
+                    recommended_articles.append(int(similar_article_id))  # Convertir en int avant l'ajout
+
+        # 7. Retourner les recommandations au format JSON
+        return jsonify({'content_recommendations': recommended_articles[:num_of_products]})
+
+    except Exception as e:
+        print(e)
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
